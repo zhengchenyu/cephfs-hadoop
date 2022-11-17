@@ -21,8 +21,11 @@
 package org.apache.hadoop.fs.ceph;
 
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.FileNotFoundException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.InetAddress;
@@ -31,6 +34,7 @@ import java.lang.Math;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -57,7 +61,6 @@ import com.ceph.fs.CephStatVFS;
 import com.ceph.crush.Bucket;
 import com.ceph.fs.CephFileExtent;
 
-
 /**
  * Known Issues:
  *
@@ -71,6 +74,22 @@ public class CephFileSystem extends FileSystem {
   private CephFsProto ceph = null;
   private static final int CEPH_STRIPE_COUNT = 1;
   private TreeMap<Integer, String> datapools = null;
+
+  public static Map<Integer, String> userId2UserName = new ConcurrentHashMap();
+  public static Map<String , Integer> userName2UserId = new ConcurrentHashMap();
+  public static Map<Integer, String> groupId2GroupName = new ConcurrentHashMap();
+  public static Map<String , Integer> groupName2GroupId = new ConcurrentHashMap();
+
+  static {
+    try {
+      fetchAllGroup();
+      LOG.info("Fetch group success!");
+    } catch (IOException e) {
+      LOG.info("Fetch group failed, caused by " + e);
+      System.exit(1);
+    }
+  }
+
 
   /**
    * Create a new CephFileSystem.
@@ -234,7 +253,7 @@ public class CephFileSystem extends FileSystem {
     FileStatus status = new FileStatus(stat.size, stat.isDir(),
           ceph.get_file_replication(path), stat.blksize, stat.m_time,
           stat.a_time, new FsPermission((short) stat.mode),
-          System.getProperty("user.name"), null, path.makeQualified(this));
+          this.getUserName(stat.uid), this.getGroupName(stat.gid), path.makeQualified(this));
 
     return status;
   }
@@ -268,6 +287,117 @@ public class CephFileSystem extends FileSystem {
   public void setPermission(Path path, FsPermission permission) throws IOException {
     path = makeAbsolute(path);
     ceph.chmod(path, permission.toShort());
+  }
+
+  @Override
+  public void setOwner(Path path, String username, String groupname) throws IOException {
+    path = makeAbsolute(path);
+    // set owner
+    CephStat stat = new CephStat();
+    int mask = 0;
+    if (username != null) {
+      int uid = getUid(username);
+      if (uid < 0) {
+        throw new IOException("Can't find new uid for " + username);
+      }
+      stat.uid = uid;
+      mask |= CephMount.SETATTR_UID;
+    }
+
+    // set group
+    if (groupname != null) {
+      int gid = getGid(groupname);
+      if (gid < 0) {
+        throw new IOException("Can't find new gid for " + groupname);
+      }
+      stat.gid = gid;
+      mask |= CephMount.SETATTR_GID;
+    }
+    ceph.setattr(path, stat, mask);
+  }
+
+  int getUid(String userName) throws IOException {
+    if (userName2UserId.containsKey(userName)) {
+      return userName2UserId.get(userName);
+    }
+    String command = "id -u " + userName;
+    Process child = Runtime.getRuntime().exec(command);
+
+    // Get the input stream and read from it
+    InputStream in = child.getInputStream();
+    BufferedReader br = new BufferedReader(new InputStreamReader(in));
+    String line;
+    int ret = -1;
+    while((line = br.readLine()) != null) {
+      ret = Integer.parseInt(line);
+    }
+    in.close();
+    if (ret >= 0) {
+      userId2UserName.put(ret, userName);
+      userName2UserId.put(userName, ret);
+    }
+    return ret;
+  }
+
+  String getUserName(int uid) throws IOException {
+    if (userId2UserName.containsKey(uid)) {
+      return userId2UserName.get(uid);
+    }
+    String command = "id -nu " + uid;
+    Process child = Runtime.getRuntime().exec(command);
+
+    // Get the input stream and read from it
+    InputStream in = child.getInputStream();
+    BufferedReader br = new BufferedReader(new InputStreamReader(in));
+    String line;
+    String userName = null;
+    while((line = br.readLine()) != null) {
+      userName = line.trim();
+    }
+    in.close();
+    if (userName != null && userName.length() > 0) {
+      userId2UserName.put(uid, userName);
+      userName2UserId.put(userName, uid);
+    }
+    return userName;
+  }
+
+  String getGroupName(int gid) throws IOException {
+    if (groupId2GroupName.containsKey(gid)) {
+      return groupId2GroupName.get(gid);
+    }
+    String userName = getUserName(gid);
+    return userName;
+  }
+
+  int getGid(String groupName) throws IOException {
+    if (groupName2GroupId.containsKey(groupName)) {
+      return groupName2GroupId.get(groupName);
+    }
+    int uid = getUid(groupName);
+    return uid;
+  }
+
+  static void fetchAllGroup() throws IOException {
+    String command = String.format("cat /etc/group");
+    Process child = Runtime.getRuntime().exec(command);
+
+    // Get the input stream and read from it
+    InputStream in = child.getInputStream();
+    BufferedReader br = new BufferedReader(new InputStreamReader(in));
+    String line;
+    int ret = -1;
+    while((line = br.readLine()) != null) {
+      String[] words = line.split(":");
+      if (words.length < 3) {
+        LOG.info("/etc/group has wrong format, line is " + line);
+      }
+      String userName = words[0];
+      Integer userId = Integer.parseInt(words[2]);
+      groupName2GroupId.put(userName, userId);
+      groupId2GroupName.put(userId, userName);
+    }
+    in.close();
   }
 
   @Override

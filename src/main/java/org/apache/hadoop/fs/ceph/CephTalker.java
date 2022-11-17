@@ -92,8 +92,10 @@ class CephTalker extends CephFsProto {
 
     /* Set monitor */
     String mon_addr = null;
-    String mon_host = uri.getHost();
-    int mon_port = uri.getPort();
+//    String mon_host = uri.getHost();
+//    int mon_port = uri.getPort();
+    String mon_host = null;
+    int mon_port = -1;
     if (mon_host != null && mon_port != -1)
       mon_addr = mon_host + ":" + mon_port;
     else {
